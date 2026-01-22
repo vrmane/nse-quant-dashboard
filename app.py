@@ -3,12 +3,19 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from io import BytesIO
 
-st.set_page_config(page_title="NSE Quant Dashboard", layout="wide")
+# ======================================================
+# PAGE CONFIG
+# ======================================================
+st.set_page_config(
+    page_title="NSE Quant Dashboard",
+    layout="wide"
+)
 
-# =========================
-# STOCK MASTER
-# =========================
+# ======================================================
+# STOCK MASTER WITH SECTORS
+# ======================================================
 STOCK_MASTER = {
     "RELIANCE.NS": "Energy",
     "TCS.NS": "IT",
@@ -18,18 +25,22 @@ STOCK_MASTER = {
     "LT.NS": "Infra"
 }
 
-# =========================
-# SIDEBAR
-# =========================
+# ======================================================
+# SIDEBAR CONTROLS
+# ======================================================
 st.sidebar.title("⚙️ Controls")
 
 selected_sectors = st.sidebar.multiselect(
-    "Sector",
-    sorted(set(STOCK_MASTER.values())),
+    "Sector Filter",
+    options=sorted(set(STOCK_MASTER.values())),
     default=sorted(set(STOCK_MASTER.values()))
 )
 
-view_mode = st.sidebar.radio("Timeframe", ["Daily", "Weekly", "Monthly"])
+view_mode = st.sidebar.radio(
+    "Timeframe",
+    ["Daily", "Weekly", "Monthly"]
+)
+
 sma_short = st.sidebar.slider("SMA Short", 10, 50, 20)
 sma_long = st.sidebar.slider("SMA Long", 50, 200, 50)
 rsi_period = st.sidebar.slider("RSI Period", 7, 21, 14)
@@ -40,32 +51,27 @@ period_map = {
     "Monthly": "10y"
 }
 
-# =========================
-# HELPERS
-# =========================
+# ======================================================
+# DATA CLEANING & INDICATORS
+# ======================================================
 def clean_ohlc(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Make yfinance output 100% predictable:
-    - Flatten columns
-    - Ensure Close is 1D float Series
-    """
     df = df.copy()
 
-    # Flatten multi-index columns if present
+    # Flatten MultiIndex columns from yfinance
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
     return df.dropna(subset=["Close"])
 
-def resample_data(df, mode):
+def resample_data(df: pd.DataFrame, mode: str) -> pd.DataFrame:
     if mode == "Weekly":
         return df.resample("W").last()
     if mode == "Monthly":
         return df.resample("M").last()
     return df
 
-def compute_indicators(df):
+def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     close = df["Close"]
 
@@ -84,10 +90,10 @@ def compute_indicators(df):
 
     return df.dropna()
 
-# =========================
-# SIGNALS (NUMPY-LEVEL SAFE)
-# =========================
-def generate_positions(df):
+# ======================================================
+# SIGNALS & METRICS (NUMPY SAFE)
+# ======================================================
+def generate_positions(df: pd.DataFrame) -> np.ndarray:
     close = df["Close"].to_numpy()
     sma_s = df["SMA_S"].to_numpy()
     sma_l = df["SMA_L"].to_numpy()
@@ -95,7 +101,7 @@ def generate_positions(df):
 
     return ((close > sma_s) & (sma_s > sma_l) & (rsi < 70)).astype(int)
 
-def compute_metrics(df):
+def compute_metrics(df: pd.DataFrame):
     df = df.copy()
 
     df["Position"] = generate_positions(df)
@@ -108,7 +114,7 @@ def compute_metrics(df):
 
     return equity, round(max_dd * 100, 2), round(vol * 100, 2)
 
-def signal_label(row):
+def signal_label(row) -> str:
     if row.Close > row.SMA_S > row.SMA_L and row.RSI < 70:
         return "Bullish"
     if row.Close < row.SMA_S < row.SMA_L and row.RSI <= 30:
@@ -117,23 +123,34 @@ def signal_label(row):
         return "Bearish"
     return "Neutral"
 
-def plot_equity(equity, stock):
+# ======================================================
+# PLOTS
+# ======================================================
+def plot_equity(equity: pd.Series, stock: str):
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(equity, label="Strategy Equity Curve")
     ax.set_title(f"{stock} – Cumulative Returns")
     ax.legend()
     st.pyplot(fig)
 
-# =========================
+# ======================================================
 # DASHBOARD
-# =========================
+# ======================================================
 st.title("📈 NSE Quant Dashboard")
 
-stocks = [s for s, sec in STOCK_MASTER.items() if sec in selected_sectors]
+stocks_to_scan = [
+    s for s, sector in STOCK_MASTER.items()
+    if sector in selected_sectors
+]
+
 results = []
 
-for stock in stocks:
-    df = yf.download(stock, period=period_map[view_mode], progress=False)
+for stock in stocks_to_scan:
+    df = yf.download(
+        stock,
+        period=period_map[view_mode],
+        progress=False
+    )
 
     if df.empty:
         continue
@@ -165,15 +182,25 @@ for stock in stocks:
 
     plot_equity(equity, stock)
 
-# =========================
-# SCREENER
-# =========================
+# ======================================================
+# SCREENER TABLE
+# ======================================================
 st.subheader("🧾 Sector-wise Screener")
 screener_df = pd.DataFrame(results)
 st.dataframe(screener_df, use_container_width=True)
 
+# ======================================================
+# EXPORT TO EXCEL (CORRECT WAY)
+# ======================================================
+output = BytesIO()
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    screener_df.to_excel(writer, index=False, sheet_name="Screener")
+
+output.seek(0)
+
 st.download_button(
-    "⬇️ Download Screener (Excel)",
-    data=screener_df.to_excel(index=False),
-    file_name="nse_quant_screener.xlsx"
+    label="⬇️ Download Screener (Excel)",
+    data=output,
+    file_name="nse_quant_screener.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
