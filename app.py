@@ -7,13 +7,10 @@ import matplotlib.pyplot as plt
 # =========================
 # PAGE CONFIG
 # =========================
-st.set_page_config(
-    page_title="NSE Quant Dashboard",
-    layout="wide"
-)
+st.set_page_config(page_title="NSE Quant Dashboard", layout="wide")
 
 # =========================
-# STOCK MASTER (SECTORS)
+# STOCK MASTER
 # =========================
 STOCK_MASTER = {
     "RELIANCE.NS": "Energy",
@@ -24,24 +21,18 @@ STOCK_MASTER = {
     "LT.NS": "Infra"
 }
 
-BENCHMARK = "^NSEI"
-
 # =========================
-# SIDEBAR CONTROLS
+# SIDEBAR
 # =========================
 st.sidebar.title("⚙️ Controls")
 
 selected_sectors = st.sidebar.multiselect(
-    "Sector Filter",
-    options=sorted(set(STOCK_MASTER.values())),
+    "Sector",
+    sorted(set(STOCK_MASTER.values())),
     default=sorted(set(STOCK_MASTER.values()))
 )
 
-view_mode = st.sidebar.radio(
-    "Timeframe",
-    ["Daily", "Weekly", "Monthly"]
-)
-
+view_mode = st.sidebar.radio("Timeframe", ["Daily", "Weekly", "Monthly"])
 sma_short = st.sidebar.slider("SMA Short", 10, 50, 20)
 sma_long = st.sidebar.slider("SMA Long", 50, 200, 50)
 rsi_period = st.sidebar.slider("RSI Period", 7, 21, 14)
@@ -53,7 +44,7 @@ period_map = {
 }
 
 # =========================
-# DATA FUNCTIONS
+# HELPERS
 # =========================
 def resample_data(df, mode):
     if mode == "Weekly":
@@ -63,7 +54,13 @@ def resample_data(df, mode):
     return df
 
 def compute_indicators(df):
+    # 🔑 FORCE Close to Series (critical fix)
     close = df["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+
+    df = df.copy()
+    df["Close"] = close
 
     df["SMA_S"] = close.rolling(sma_short).mean()
     df["SMA_L"] = close.rolling(sma_long).mean()
@@ -80,23 +77,13 @@ def compute_indicators(df):
 
     return df.dropna()
 
-# =========================
-# VECTORISED SIGNAL LOGIC (SAFE)
-# =========================
 def generate_positions(df):
-    """
-    Vectorized bullish signal:
-    Close > SMA short > SMA long AND RSI < 70
-    """
     return (
         (df["Close"] > df["SMA_S"]) &
         (df["SMA_S"] > df["SMA_L"]) &
         (df["RSI"] < 70)
     ).astype(int)
 
-# =========================
-# METRICS
-# =========================
 def compute_metrics(df):
     df = df.copy()
 
@@ -104,63 +91,38 @@ def compute_metrics(df):
     df["Returns"] = df["Close"].pct_change()
     df["Strategy_Return"] = df["Returns"] * df["Position"].shift(1)
 
-    equity_curve = (1 + df["Strategy_Return"].fillna(0)).cumprod()
+    equity = (1 + df["Strategy_Return"].fillna(0)).cumprod()
+    max_dd = ((equity / equity.cummax()) - 1).min()
+    vol = df["Strategy_Return"].std() * np.sqrt(252)
 
-    max_drawdown = ((equity_curve / equity_curve.cummax()) - 1).min()
-    volatility = df["Strategy_Return"].std() * np.sqrt(252)
+    return equity, round(max_dd * 100, 2), round(vol * 100, 2)
 
-    return equity_curve, round(max_drawdown * 100, 2), round(volatility * 100, 2)
-
-def get_signal_label(last_row):
-    if (
-        last_row.Close > last_row.SMA_S and
-        last_row.SMA_S > last_row.SMA_L and
-        last_row.RSI < 70
-    ):
+def signal_label(row):
+    if row.Close > row.SMA_S > row.SMA_L and row.RSI < 70:
         return "Bullish"
-    elif (
-        last_row.Close < last_row.SMA_S and
-        last_row.SMA_S < last_row.SMA_L and
-        last_row.RSI <= 30
-    ):
+    elif row.Close < row.SMA_S < row.SMA_L and row.RSI <= 30:
         return "Bearish Oversold"
-    elif last_row.Close < last_row.SMA_S < last_row.SMA_L:
+    elif row.Close < row.SMA_S < row.SMA_L:
         return "Bearish"
-    else:
-        return "Neutral"
+    return "Neutral"
 
-# =========================
-# PLOTS
-# =========================
-def plot_equity_curve(curve, stock):
+def plot_equity(equity, stock):
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(curve, label="Strategy Equity Curve")
+    ax.plot(equity, label="Strategy Equity")
     ax.set_title(f"{stock} – Cumulative Returns")
     ax.legend()
     st.pyplot(fig)
-
-# =========================
-# FILTER STOCKS
-# =========================
-stocks_to_scan = [
-    s for s, sector in STOCK_MASTER.items()
-    if sector in selected_sectors
-]
 
 # =========================
 # DASHBOARD
 # =========================
 st.title("📈 NSE Quant Dashboard")
 
+stocks = [s for s, sec in STOCK_MASTER.items() if sec in selected_sectors]
 results = []
 
-for stock in stocks_to_scan:
-    df = yf.download(
-        stock,
-        period=period_map[view_mode],
-        progress=False
-    )
-
+for stock in stocks:
+    df = yf.download(stock, period=period_map[view_mode], progress=False)
     if df.empty:
         continue
 
@@ -170,38 +132,35 @@ for stock in stocks_to_scan:
     equity, max_dd, vol = compute_metrics(df)
     last = df.iloc[-1]
 
-    signal = get_signal_label(last)
+    sig = signal_label(last)
 
     results.append({
         "Stock": stock,
         "Sector": STOCK_MASTER[stock],
         "Last Close": round(float(last.Close), 2),
         "RSI": round(float(last.RSI), 2),
-        "Signal": signal,
+        "Signal": sig,
         "Max Drawdown %": max_dd,
         "Volatility %": vol
     })
 
     st.subheader(stock)
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Signal", signal)
-    col2.metric("Max Drawdown", f"{max_dd}%")
-    col3.metric("Volatility", f"{vol}%")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Signal", sig)
+    c2.metric("Max DD", f"{max_dd}%")
+    c3.metric("Volatility", f"{vol}%")
 
-    plot_equity_curve(equity, stock)
+    plot_equity(equity, stock)
 
 # =========================
-# SCREENER TABLE
+# SCREENER
 # =========================
-st.subheader("🧾 Sector-wise Screener")
+st.subheader("🧾 Screener")
 screener_df = pd.DataFrame(results)
 st.dataframe(screener_df, use_container_width=True)
 
-# =========================
-# EXPORT
-# =========================
 st.download_button(
-    "⬇️ Download Screener (Excel)",
+    "⬇️ Download Screener",
     data=screener_df.to_excel(index=False),
     file_name="nse_quant_screener.xlsx"
 )
