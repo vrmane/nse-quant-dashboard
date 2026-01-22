@@ -4,9 +4,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# =========================
-# PAGE CONFIG
-# =========================
 st.set_page_config(page_title="NSE Quant Dashboard", layout="wide")
 
 # =========================
@@ -46,6 +43,21 @@ period_map = {
 # =========================
 # HELPERS
 # =========================
+def clean_ohlc(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Make yfinance output 100% predictable:
+    - Flatten columns
+    - Ensure Close is 1D float Series
+    """
+    df = df.copy()
+
+    # Flatten multi-index columns if present
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+    return df.dropna(subset=["Close"])
+
 def resample_data(df, mode):
     if mode == "Weekly":
         return df.resample("W").last()
@@ -54,13 +66,8 @@ def resample_data(df, mode):
     return df
 
 def compute_indicators(df):
-    # 🔑 FORCE Close to Series (critical fix)
-    close = df["Close"]
-    if isinstance(close, pd.DataFrame):
-        close = close.iloc[:, 0]
-
     df = df.copy()
-    df["Close"] = close
+    close = df["Close"]
 
     df["SMA_S"] = close.rolling(sma_short).mean()
     df["SMA_L"] = close.rolling(sma_long).mean()
@@ -77,21 +84,25 @@ def compute_indicators(df):
 
     return df.dropna()
 
+# =========================
+# SIGNALS (NUMPY-LEVEL SAFE)
+# =========================
 def generate_positions(df):
-    return (
-        (df["Close"] > df["SMA_S"]) &
-        (df["SMA_S"] > df["SMA_L"]) &
-        (df["RSI"] < 70)
-    ).astype(int)
+    close = df["Close"].to_numpy()
+    sma_s = df["SMA_S"].to_numpy()
+    sma_l = df["SMA_L"].to_numpy()
+    rsi = df["RSI"].to_numpy()
+
+    return ((close > sma_s) & (sma_s > sma_l) & (rsi < 70)).astype(int)
 
 def compute_metrics(df):
     df = df.copy()
 
     df["Position"] = generate_positions(df)
-    df["Returns"] = df["Close"].pct_change()
-    df["Strategy_Return"] = df["Returns"] * df["Position"].shift(1)
+    df["Returns"] = df["Close"].pct_change().fillna(0)
+    df["Strategy_Return"] = df["Returns"] * np.roll(df["Position"], 1)
 
-    equity = (1 + df["Strategy_Return"].fillna(0)).cumprod()
+    equity = (1 + df["Strategy_Return"]).cumprod()
     max_dd = ((equity / equity.cummax()) - 1).min()
     vol = df["Strategy_Return"].std() * np.sqrt(252)
 
@@ -100,15 +111,15 @@ def compute_metrics(df):
 def signal_label(row):
     if row.Close > row.SMA_S > row.SMA_L and row.RSI < 70:
         return "Bullish"
-    elif row.Close < row.SMA_S < row.SMA_L and row.RSI <= 30:
+    if row.Close < row.SMA_S < row.SMA_L and row.RSI <= 30:
         return "Bearish Oversold"
-    elif row.Close < row.SMA_S < row.SMA_L:
+    if row.Close < row.SMA_S < row.SMA_L:
         return "Bearish"
     return "Neutral"
 
 def plot_equity(equity, stock):
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(equity, label="Strategy Equity")
+    ax.plot(equity, label="Strategy Equity Curve")
     ax.set_title(f"{stock} – Cumulative Returns")
     ax.legend()
     st.pyplot(fig)
@@ -123,9 +134,11 @@ results = []
 
 for stock in stocks:
     df = yf.download(stock, period=period_map[view_mode], progress=False)
+
     if df.empty:
         continue
 
+    df = clean_ohlc(df)
     df = resample_data(df, view_mode)
     df = compute_indicators(df)
 
@@ -147,7 +160,7 @@ for stock in stocks:
     st.subheader(stock)
     c1, c2, c3 = st.columns(3)
     c1.metric("Signal", sig)
-    c2.metric("Max DD", f"{max_dd}%")
+    c2.metric("Max Drawdown", f"{max_dd}%")
     c3.metric("Volatility", f"{vol}%")
 
     plot_equity(equity, stock)
@@ -155,12 +168,12 @@ for stock in stocks:
 # =========================
 # SCREENER
 # =========================
-st.subheader("🧾 Screener")
+st.subheader("🧾 Sector-wise Screener")
 screener_df = pd.DataFrame(results)
 st.dataframe(screener_df, use_container_width=True)
 
 st.download_button(
-    "⬇️ Download Screener",
+    "⬇️ Download Screener (Excel)",
     data=screener_df.to_excel(index=False),
     file_name="nse_quant_screener.xlsx"
 )
