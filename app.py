@@ -8,10 +8,7 @@ from io import BytesIO
 # ======================================================
 # PAGE CONFIG
 # ======================================================
-st.set_page_config(
-    page_title="NSE Quant Dashboard",
-    layout="wide"
-)
+st.set_page_config(page_title="NSE Quant Dashboard", layout="wide")
 
 # ======================================================
 # STOCK MASTER WITH SECTORS
@@ -36,10 +33,7 @@ selected_sectors = st.sidebar.multiselect(
     default=sorted(set(STOCK_MASTER.values()))
 )
 
-view_mode = st.sidebar.radio(
-    "Timeframe",
-    ["Daily", "Weekly", "Monthly"]
-)
+view_mode = st.sidebar.radio("Timeframe", ["Daily", "Weekly", "Monthly"])
 
 sma_short = st.sidebar.slider("SMA Short", 10, 50, 20)
 sma_long = st.sidebar.slider("SMA Long", 50, 200, 50)
@@ -52,29 +46,24 @@ period_map = {
 }
 
 # ======================================================
-# DATA CLEANING & INDICATORS
+# DATA PREP
 # ======================================================
-def clean_ohlc(df: pd.DataFrame) -> pd.DataFrame:
+def clean_ohlc(df):
     df = df.copy()
-
-    # Flatten MultiIndex columns from yfinance
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-
     df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
     return df.dropna(subset=["Close"])
 
-def resample_data(df: pd.DataFrame, mode: str) -> pd.DataFrame:
+def resample_data(df, mode):
     if mode == "Weekly":
         return df.resample("W").last()
     if mode == "Monthly":
         return df.resample("M").last()
     return df
 
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+def compute_indicators(df):
     close = df["Close"]
-
     df["SMA_S"] = close.rolling(sma_short).mean()
     df["SMA_L"] = close.rolling(sma_long).mean()
 
@@ -84,53 +73,69 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     avg_gain = gain.rolling(rsi_period).mean()
     avg_loss = loss.rolling(rsi_period).mean()
-
     rs = avg_gain / avg_loss
-    df["RSI"] = 100 - (100 / (1 + rs))
 
+    df["RSI"] = 100 - (100 / (1 + rs))
     return df.dropna()
 
 # ======================================================
-# SIGNALS & METRICS (NUMPY SAFE)
+# STRATEGIES
 # ======================================================
-def generate_positions(df: pd.DataFrame) -> np.ndarray:
+def trend_strategy(df):
     close = df["Close"].to_numpy()
     sma_s = df["SMA_S"].to_numpy()
     sma_l = df["SMA_L"].to_numpy()
     rsi = df["RSI"].to_numpy()
 
-    return ((close > sma_s) & (sma_s > sma_l) & (rsi < 70)).astype(int)
+    position = ((close > sma_s) & (sma_s > sma_l) & (rsi < 70)).astype(int)
+    return position
 
-def compute_metrics(df: pd.DataFrame):
-    df = df.copy()
+def buy_and_hold(df):
+    return np.ones(len(df))
 
-    df["Position"] = generate_positions(df)
-    df["Returns"] = df["Close"].pct_change().fillna(0)
-    df["Strategy_Return"] = df["Returns"] * np.roll(df["Position"], 1)
+# ======================================================
+# METRICS
+# ======================================================
+def compute_performance(df, position):
+    returns = df["Close"].pct_change().fillna(0)
+    strat_returns = returns * np.roll(position, 1)
 
-    equity = (1 + df["Strategy_Return"]).cumprod()
-    max_dd = ((equity / equity.cummax()) - 1).min()
-    vol = df["Strategy_Return"].std() * np.sqrt(252)
+    equity = (1 + strat_returns).cumprod()
 
-    return equity, round(max_dd * 100, 2), round(vol * 100, 2)
+    drawdown = equity / equity.cummax() - 1
+    max_dd = drawdown.min()
 
-def signal_label(row) -> str:
-    if row.Close > row.SMA_S > row.SMA_L and row.RSI < 70:
-        return "Bullish"
-    if row.Close < row.SMA_S < row.SMA_L and row.RSI <= 30:
-        return "Bearish Oversold"
-    if row.Close < row.SMA_S < row.SMA_L:
-        return "Bearish"
-    return "Neutral"
+    sharpe = (strat_returns.mean() / strat_returns.std()) * np.sqrt(252)
+    downside = strat_returns[strat_returns < 0]
+    sortino = (
+        strat_returns.mean() /
+        downside.std()
+    ) * np.sqrt(252) if len(downside) > 0 else np.nan
+
+    return {
+        "equity": equity,
+        "returns": strat_returns,
+        "drawdown": drawdown,
+        "Sharpe": round(sharpe, 2),
+        "Sortino": round(sortino, 2),
+        "MaxDD": round(max_dd * 100, 2)
+    }
 
 # ======================================================
 # PLOTS
 # ======================================================
-def plot_equity(equity: pd.Series, stock: str):
+def plot_equity_comparison(trend_eq, bh_eq, stock):
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(equity, label="Strategy Equity Curve")
-    ax.set_title(f"{stock} – Cumulative Returns")
+    ax.plot(trend_eq, label="Trend Strategy")
+    ax.plot(bh_eq, label="Buy & Hold", linestyle="--")
+    ax.set_title(f"{stock} – Equity Curve Comparison")
     ax.legend()
+    st.pyplot(fig)
+
+def plot_drawdown(drawdown, stock):
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.fill_between(drawdown.index, drawdown, color="red", alpha=0.4)
+    ax.set_title(f"{stock} – Rolling Drawdown")
     st.pyplot(fig)
 
 # ======================================================
@@ -139,19 +144,14 @@ def plot_equity(equity: pd.Series, stock: str):
 st.title("📈 NSE Quant Dashboard")
 
 stocks_to_scan = [
-    s for s, sector in STOCK_MASTER.items()
-    if sector in selected_sectors
+    s for s, sec in STOCK_MASTER.items()
+    if sec in selected_sectors
 ]
 
 results = []
 
 for stock in stocks_to_scan:
-    df = yf.download(
-        stock,
-        period=period_map[view_mode],
-        progress=False
-    )
-
+    df = yf.download(stock, period=period_map[view_mode], progress=False)
     if df.empty:
         continue
 
@@ -159,48 +159,57 @@ for stock in stocks_to_scan:
     df = resample_data(df, view_mode)
     df = compute_indicators(df)
 
-    equity, max_dd, vol = compute_metrics(df)
-    last = df.iloc[-1]
+    trend_pos = trend_strategy(df)
+    bh_pos = buy_and_hold(df)
 
-    sig = signal_label(last)
+    trend_perf = compute_performance(df, trend_pos)
+    bh_perf = compute_performance(df, bh_pos)
+
+    last = df.iloc[-1]
 
     results.append({
         "Stock": stock,
         "Sector": STOCK_MASTER[stock],
-        "Last Close": round(float(last.Close), 2),
-        "RSI": round(float(last.RSI), 2),
-        "Signal": sig,
-        "Max Drawdown %": max_dd,
-        "Volatility %": vol
+        "Sharpe (Trend)": trend_perf["Sharpe"],
+        "Sortino (Trend)": trend_perf["Sortino"],
+        "Max DD % (Trend)": trend_perf["MaxDD"],
+        "Sharpe (B&H)": bh_perf["Sharpe"]
     })
 
     st.subheader(stock)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Signal", sig)
-    c2.metric("Max Drawdown", f"{max_dd}%")
-    c3.metric("Volatility", f"{vol}%")
 
-    plot_equity(equity, stock)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Sharpe", trend_perf["Sharpe"])
+    c2.metric("Sortino", trend_perf["Sortino"])
+    c3.metric("Max Drawdown", f'{trend_perf["MaxDD"]}%')
+
+    plot_equity_comparison(
+        trend_perf["equity"],
+        bh_perf["equity"],
+        stock
+    )
+
+    plot_drawdown(trend_perf["drawdown"], stock)
 
 # ======================================================
 # SCREENER TABLE
 # ======================================================
-st.subheader("🧾 Sector-wise Screener")
+st.subheader("🧾 Strategy Comparison Screener")
 screener_df = pd.DataFrame(results)
 st.dataframe(screener_df, use_container_width=True)
 
 # ======================================================
-# EXPORT TO EXCEL (CORRECT WAY)
+# EXPORT
 # ======================================================
 output = BytesIO()
 with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    screener_df.to_excel(writer, index=False, sheet_name="Screener")
+    screener_df.to_excel(writer, index=False, sheet_name="Strategy_Comparison")
 
 output.seek(0)
 
 st.download_button(
-    label="⬇️ Download Screener (Excel)",
+    label="⬇️ Download Strategy Screener",
     data=output,
-    file_name="nse_quant_screener.xlsx",
+    file_name="nse_strategy_comparison.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
